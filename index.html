@@ -42,7 +42,8 @@
   </div>
 
   <script>
-    fetch('data.json')
+    fetch('data.json?t=' + new Date().getTime())
+
       .then(res => res.json())
       .then(data => {
         if (!data || data.length === 0) return;
