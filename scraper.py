@@ -2,7 +2,7 @@ import json
 import os
 import re
 from bs4 import BeautifulSoup
-import requests
+from playwright.sync_api import sync_playwright
 
 DATA_FILE = "data.json"
 
@@ -15,63 +15,62 @@ if os.path.exists(DATA_FILE):
 else:
   history = []
 
-# Stockbee 官方公開的文章 RSS Feed (包含最新幾日的完整發文內容)
-FEED_URL = "https://stockbee.blogspot.com/feeds/posts/default?alt=json"
-headers = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-    )
-}
+print("啟動無頭瀏覽器加載 Stockbee MM 頁面...")
+all_extracted = []
 
-print(f"正在讀取 Stockbee 官方最新文章 Feed: {FEED_URL}")
-resp = requests.get(FEED_URL, headers=headers, timeout=20)
-feed_data = resp.json()
+with sync_playwright() as p:
+  browser = p.chromium.launch(headless=True)
+  page = browser.new_page()
 
-entries = feed_data.get("feed", {}).get("entry", [])
-print(f"成功取得最新 {len(entries)} 篇文章，開始搜尋 Market Monitor 數據...")
+  # 進入 Stockbee MM 頁面
+  page.goto("https://stockbee.blogspot.com/p/mm.html", timeout=60000)
+  page.wait_for_load_state("networkidle")
 
-found = False
-for entry in entries:
-  title = entry.get("title", {}).get("$t", "")
-  content = entry.get("content", {}).get("$t", "")
+  # 遍歷頁面中的所有 frame（試算表內嵌）
+  for frame in page.frames:
+    try:
+      # 尋找包含 2026 或 Date 的表格內容
+      frame_text = frame.inner_text("body")
+      if "Stockbee Market Monitor" in frame_text or "Primary Breadth" in frame_text:
+        print("成功鎖定 2026 Market Monitor 嵌入表格！開始提取資料...")
+        lines = frame_text.split("\n")
 
-  # 解析文章內文的純文字
-  soup = BeautifulSoup(content, "html.parser")
-  text = soup.get_text("\n")
+        for line in lines:
+          parts = re.split(r"\t+|\s{2,}", line.strip())
+          # 尋找類似 9/23/2026 的日期開頭行
+          if parts and re.match(r"\d{1,2}/\d{1,2}/202\d", parts[0]):
+            nums = []
+            for item in parts[1:]:
+              cleaned = re.sub(r"[^\d.]", "", item)
+              if cleaned:
+                nums.append(cleaned)
 
-  # 尋找是否包含 MM / 4% up / T2108 等關鍵數據
-  t2108_match = re.search(r"T2108[:\s]+([\d\.]+)", text, re.I)
-  up_match = re.search(r"4%\s*(?:up|\+)[^\d]*(\d+)", text, re.I)
-  down_match = re.search(r"4%\s*(?:down|\-)[^\d]*(\d+)", text, re.I)
+            if len(nums) >= 2:
+              up_val = int(float(nums[0]))
+              down_val = int(float(nums[1]))
+              # 如果有抓到 T2108 則填入，否則取 50
+              t2108_val = float(nums[4]) if len(nums) >= 5 else 50.0
 
-  # 日期從文章發布時間提取
-  pub_date = entry.get("published", {}).get("$t", "")[:10]
+              all_extracted.append({
+                  "date": parts[0],
+                  "up_4": up_val,
+                  "down_4": down_val,
+                  "t2108": t2108_val,
+              })
+        break
+    except Exception:
+      continue
 
-  if t2108_match and up_match and down_match:
-    t2108_val = float(t2108_match.group(1))
-    up_val = int(up_match.group(1))
-    down_val = int(down_match.group(1))
+  browser.close()
 
-    new_record = {
-        "date": pub_date,
-        "up_4": up_val,
-        "down_4": down_val,
-        "t2108": t2108_val,
-    }
-    print(f"成功在文章「{title}」中提取到官方數據: {new_record}")
+print(f"成功提取到 {len(all_extracted)} 筆 Stockbee 原裝數據！")
 
-    # 去重並排在最前面
-    history = [h for h in history if h.get("date") != pub_date]
-    history.insert(0, new_record)
-    found = True
-    break
-
-if not found:
-  print(
-      "最新文章中未找到文字形式的 MM 數字，先保留現有歷史數據以避免覆蓋。"
-  )
+if all_extracted:
+  print(f"最新一筆數據: {all_extracted[0]}")
+  # 更新前 60 筆歷史
+  history = all_extracted[:60]
 
 with open(DATA_FILE, "w", encoding="utf-8") as f:
-  json.dump(history[:60], f, indent=2, ensure_ascii=False)
+  json.dump(history, f, indent=2, ensure_ascii=False)
 
-print("data.json 已更新完成！")
+print("data.json 已更新成功！")
