@@ -1,30 +1,74 @@
+import csv
+import io
 import json
 import os
 import re
-from playwright.sync_api import sync_playwright
+import requests
 
-print('正在連線 Stockbee 讀取頁面結構...')
+# Stockbee 官方永久發布的 Google 試算表 CSV 導出網址
+CSV_URL = (
+    "https://docs.google.com/spreadsheet/pub?key=0Am_cU8NLIU20dEhiQnVEN3Nnc3B1S3J6eGhKZFowN3c&output=csv"
+)
+DATA_FILE = "data.json"
 
-with sync_playwright() as p:
-  browser = p.chromium.launch(headless=True)
-  page = browser.new_page()
-  page.goto('https://stockbee.blogspot.com/p/mm.html', timeout=60000)
-  page.wait_for_load_state('networkidle')
+print(f"正在直接下載 Stockbee 官方試算表數據: {CSV_URL}")
 
-  # 1. 抓取頁面所有文字
-  text_content = page.inner_text('body')
+headers = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    )
+}
+resp = requests.get(CSV_URL, headers=headers, timeout=20)
+resp.encoding = "utf-8"
 
-  # 2. 抓取頁面所有 iframe 原始連結 (印出黎睇下到底藏在哪)
-  iframes = page.locator('iframe').all()
-  iframe_srcs = [
-      ifr.get_attribute('src') for ifr in iframes if ifr.get_attribute('src')
-  ]
+# 讀取現有歷史紀錄
+if os.path.exists(DATA_FILE):
+  try:
+    with open(DATA_FILE, "r", encoding="utf-8") as f:
+      history = json.load(f)
+  except Exception:
+    history = []
+else:
+  history = []
 
-  browser.close()
+reader = list(csv.reader(io.StringIO(resp.text)))
+extracted = []
 
-print('=== 【偵測到的所有 IFRAME 網址】 ===')
-for src in iframe_srcs:
-  print(src)
+print(f"下載成功，總共取得 {len(reader)} 行數據，開始解析欄位...")
 
-print('\n=== 【頁面主體文字預覽 (前 800 字)】 ===')
-print(text_content[:800])
+for row in reader:
+  # 尋找包含日期格式的第一欄 (例如 9/24/2026 或 2026-09-24)
+  if row and re.search(r"\d{1,2}[/-]\d{1,2}", row[0]):
+    # 提取後續所有包含數值的儲存格
+    nums = []
+    for cell in row[1:]:
+      cleaned = re.sub(r"[^\d.]", "", cell.strip())
+      if cleaned:
+        nums.append(cleaned)
+
+    # 提取 Stockbee 標準寬度：4% Up, 4% Down, T2108
+    if len(nums) >= 3:
+      try:
+        up_4 = int(float(nums[0]))
+        down_4 = int(float(nums[1]))
+        t2108 = float(nums[2])
+
+        extracted.append({
+            "date": row[0].strip(),
+            "up_4": up_4,
+            "down_4": down_4,
+            "t2108": t2108,
+        })
+      except Exception:
+        continue
+
+print(f"成功解析出 {len(extracted)} 筆 Stockbee 歷史數據！")
+
+if extracted:
+  print(f"最新一筆數據: {extracted[0]}")
+  history = extracted[:60]  # 保留最新的 60 天真實記錄
+
+with open(DATA_FILE, "w", encoding="utf-8") as f:
+  json.dump(history, f, indent=2, ensure_ascii=False)
+
+print("data.json 已更新成功！")
