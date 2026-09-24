@@ -1,79 +1,64 @@
-import csv
 import io
 import json
 import os
 import re
+from bs4 import BeautifulSoup
 import requests
 
-# Stockbee 公開的 Google 試算表發布連結 (自動導出為 CSV 格式)
-# 備用：若 MM 發布頁改變，先抓取網頁獲取真實 doc ID
-MM_PAGE = "https://stockbee.blogspot.com/p/mm.html"
-headers = {"User-Agent": "Mozilla/5.0"}
-
-csv_url = None
-try:
-  res = requests.get(MM_PAGE, headers=headers, timeout=10)
-  # 尋找 google docs sheet ID
-  match = re.search(
-      r"docs\.google\.com/spreadsheets/d/([a-zA-Z0-9-_]+)", res.text
-  )
-  if match:
-    sheet_id = match.group(1)
-    csv_url = (
-        f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv"
+HEADERS = {
+    'User-Agent': (
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
     )
-except Exception:
-  pass
+}
+DATA_FILE = 'data.json'
 
-# 如果抓不到 ID，使用備用固定 ID (Stockbee 沿用已久的發布表格)
-if not csv_url:
-  csv_url = (
-      "https://docs.google.com/spreadsheets/d/e/2PACX-1vRe28xIqX-"
-      "7s7d5_bL8Hh4A_sE/pub?output=csv"
-  )
+# 讀取現有歷史
+if os.path.exists(DATA_FILE):
+  try:
+    with open(DATA_FILE, 'r', encoding='utf-8') as f:
+      history = json.load(f)
+  except Exception:
+    history = []
+else:
+  history = []
 
-print(f"下載 CSV 數據: {csv_url}")
-data_file = "data.json"
-history = []
+# Stockbee MM 主頁解析
+BLOG_URL = 'https://stockbee.blogspot.com/p/mm.html'
+found_entries = []
 
 try:
-  r = requests.get(csv_url, headers=headers, timeout=15)
-  r.encoding = "utf-8"
-  reader = list(csv.reader(io.StringIO(r.text)))
+  res = requests.get(BLOG_URL, headers=HEADERS, timeout=15)
+  soup = BeautifulSoup(res.text, 'html.parser')
 
-  for row in reader:
-    # 尋找有日期與數據的列
-    if len(row) >= 4 and any(char.isdigit() for char in row[0]):
-      date_str = row[0].strip()
-      nums = [re.sub(r"[^\d.]", "", c) for c in row[1:5] if c.strip()]
+  # 尋找頁面中的表格或嵌入來源
+  for row in soup.find_all('tr'):
+    cols = [c.get_text(strip=True) for c in row.find_all(['td', 'th'])]
+    # 尋找符合日期特徵的資料列 (如 9/23, 2026-09-23)
+    if cols and re.search(r'\d{1,2}/\d{1,2}|\d{4}[-/]\d{2}', cols[0]):
+      nums = [re.sub(r'[^\d.]', '', c) for c in cols[1:] if c]
+      nums = [n for n in nums if n]
       if len(nums) >= 3:
         try:
-          up_4 = int(float(nums[0]))
-          down_4 = int(float(nums[1]))
-          t2108 = float(nums[2])
-          history.append({
-              "date": date_str,
-              "up_4": up_4,
-              "down_4": down_4,
-              "t2108": t2108,
+          found_entries.append({
+              'date': cols[0],
+              'up_4': int(float(nums[0])),
+              'down_4': int(float(nums[1])),
+              't2108': float(nums[2]),
           })
         except Exception:
           continue
 except Exception as e:
-  print(f"讀取失敗: {e}")
+  print(f'解析出錯: {e}')
 
-# 備用安全數據：確保 App 不會空白
-if not history:
-  # 填入最新參考數值，確保介面有數據跑出
-  history = [{
-      "date": "2026-03-24",
-      "up_4": 182,
-      "down_4": 94,
-      "t2108": 48.5,
-  }]
+# 若成功抓到資料，合併去重
+if found_entries:
+  for entry in found_entries:
+    if not any(h.get('date') == entry['date'] for h in history):
+      history.insert(0, entry)
+  print(f'成功獲取最新數據: {found_entries[0]}')
+else:
+  print('頁面未更新或格式未變更，保留現有歷史數據。')
 
-# 儲存最新的 60 筆歷史
-with open(data_file, "w", encoding="utf-8") as f:
+# 儲存最近 60 筆
+with open(DATA_FILE, 'w', encoding='utf-8') as f:
   json.dump(history[:60], f, indent=2, ensure_ascii=False)
-
-print(f"成功寫入 {len(history)} 筆數據！")
